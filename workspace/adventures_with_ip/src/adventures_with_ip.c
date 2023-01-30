@@ -1,0 +1,275 @@
+/*
+ * adventures_with_ip.c
+ *
+ * Main source file. Contains main() and menu() functions.
+ */
+#include "adventures_with_ip.h"
+
+const int * KENNY_AUDIO_MEM_START = (int *) 0x00200000;
+const int * KENNY_AUDIO_MEM_END   = (int *) 0x3fffffff;
+//const int * KENNY_AUDIO_MEM_END   = (int *) 0x3FFFFFFF;
+
+enum speedup_t {quartertime = 1, halftime = 2, normaltime = 3, doubletime = 4, quadrupletime = 5, unchanged = 0};
+
+
+void kenny_UpdateSpeedupFromGpios(enum speedup_t * speedup)
+{
+	u32 btns;
+	btns = XGpio_DiscreteRead(&Gpio, BUTTON_CHANNEL);
+
+	if (btns == 1){
+		if (*speedup != normaltime){
+			xil_printf("Speed = normal\r\n");
+		}
+		*speedup = normaltime;
+	}
+	else if (btns == 4){
+		if (*speedup != halftime){
+			xil_printf("Speed = half\r\n");
+		}
+		*speedup = halftime;
+	}
+	else if (btns == 2){
+		if (*speedup != quartertime){
+			xil_printf("Speed = quarter\r\n");
+		}
+		*speedup = quartertime;
+	}
+	else if (btns == 8){
+		if (*speedup != doubletime){
+			xil_printf("Speed = double\r\n");
+		}
+		*speedup = doubletime;
+	}
+	else if (btns == 16){
+		if (*speedup != quadrupletime){
+			xil_printf("Speed = quadruple\r\n");
+		}
+		*speedup = quadrupletime;
+	}
+}
+
+void kenny_PlaybackAudioFromMem(enum speedup_t speed)
+{
+	u32  in_left, in_right;
+	int * cur_ptr = KENNY_AUDIO_MEM_START;
+	u32 out_of_mem_flag = 0;
+
+	int i = 0;
+	int threshold = 0;
+	int incr_amount = 0;
+
+	while (!XUartPs_IsReceiveData(UART_BASEADDR)){
+		if (speed == quartertime)
+		{
+			threshold = 4;
+			incr_amount = 1;
+		}
+		else if (speed == halftime)
+		{
+			threshold = 2;
+			incr_amount = 1;
+		}
+		else if (speed == normaltime)
+		{
+			threshold = 1;
+			incr_amount = 1;
+		}
+		else if (speed == doubletime)
+		{
+			threshold = 1;
+			incr_amount = 2;
+		}
+		else if (speed == quadrupletime)
+		{
+			threshold = 1;
+			incr_amount = 4;
+		}
+
+
+		// Read audio data from memory
+		in_left  = *(cur_ptr);
+		in_right = *(cur_ptr+1);
+		++i;
+
+		if (i == threshold){
+			i = 0;
+			cur_ptr += 2*incr_amount;
+		}
+
+		// Write audio data to audio codec
+		Xil_Out32(I2S_DATA_TX_L_REG, in_left);
+		Xil_Out32(I2S_DATA_TX_R_REG, in_right);
+
+		if (cur_ptr >= KENNY_AUDIO_MEM_END-1){
+			out_of_mem_flag = 1;
+			break;
+		}
+	}
+
+	if (out_of_mem_flag == 1){
+		menu();
+	}
+	/* If input from the terminal is 'q', then return to menu.
+	 * Else, continue streaming. */
+	if(XUartPs_ReadReg(UART_BASEADDR, XUARTPS_FIFO_OFFSET) == 'q') menu();
+	else kenny_PlaybackAudioFromMem(speed);
+
+}
+
+
+void kenny_RecordAudioIntoMem()
+{
+	u32  in_left, in_right;
+	int * cur_ptr = KENNY_AUDIO_MEM_START;
+	u32 out_of_mem_flag = 0;
+
+	//memset(KENNY_AUDIO_MEM_START, 0, (KENNY_AUDIO_MEM_END - KENNY_AUDIO_MEM_START));
+
+	/*
+	for ( int* i = KENNY_AUDIO_MEM_START; i < KENNY_AUDIO_MEM_END; ++i)
+	{
+		*(i) = 0;
+	}
+	*/
+
+	while (!XUartPs_IsReceiveData(UART_BASEADDR)){
+		// Read audio input from codec
+		in_left = Xil_In32(I2S_DATA_RX_L_REG);
+		in_right = Xil_In32(I2S_DATA_RX_R_REG);
+		// Save to memory
+
+
+		*(cur_ptr++) = in_left;
+		*(cur_ptr++) = in_right;
+
+
+		if (cur_ptr >= KENNY_AUDIO_MEM_END-1){
+			out_of_mem_flag = 1;
+			break;
+		}
+	}
+
+	if (out_of_mem_flag == 1){
+		menu();
+	}
+
+	/* If input from the terminal is 'q', then return to menu.
+	 * Else, continue streaming. */
+	if(XUartPs_ReadReg(UART_BASEADDR, XUARTPS_FIFO_OFFSET) == 'q') menu();
+	else kenny_RecordAudioIntoMem();
+
+}
+
+void kenny_GPIOTest(){
+	while(1){
+		u32 btns;
+		u32 sws;
+		btns = XGpio_DiscreteRead(&Gpio, BUTTON_CHANNEL);
+		xil_printf("Buttons State: %d \r\n", btns);
+
+		sws = XGpio_DiscreteRead(&Gpio, SWITCH_CHANNEL);
+		xil_printf("Push Buttons State: %d \r\n", sws);
+	}
+}
+
+/* ---------------------------------------------------------------------------- *
+ * 									main()										*
+ * ---------------------------------------------------------------------------- *
+ * Runs all initial setup functions to initialise the audio codec and IP
+ * peripherals, before calling the interactive menu system.
+ * ---------------------------------------------------------------------------- */
+int main(void)
+{
+	xil_printf("Entering Main\r\n");
+	//Configure the IIC data structure
+	IicConfig(XPAR_XIICPS_0_DEVICE_ID);
+
+	//Configure the Audio Codec's PLL
+	AudioPllConfig();
+
+	//Configure the Line in and Line out ports.
+	//Call LineInLineOutConfig() for a configuration that
+	//enables the HP jack too.
+	AudioConfigureJacks();
+
+	xil_printf("ADAU1761 configured\n\r");
+
+	/* Initialise GPIO and NCO peripherals */
+	gpio_init();
+	//nco_init(&Nco);
+
+	xil_printf("GPIO and NCO peripheral configured\r\n");
+
+	/* Display interactive menu interface via terminal */
+	menu();
+
+	//kenny_GPIOTest();
+
+    return 1;
+}
+
+
+
+/* ---------------------------------------------------------------------------- *
+ * 									menu()										*
+ * ---------------------------------------------------------------------------- *
+ * Presented at system startup. Allows the user to select between three
+ * options by pressing certain keys on the keyboard:
+ * 		's' - 	Audio loopback streaming
+ * 		'n' - 	Tonal noise is generated by an NCO and added to the audio
+ * 				being captured from the audio codec.
+ * 		'f' - 	The audio + tonal noise is passed to an adaptive LMS noise
+ * 				cancellation filter which will use the tonal noise estimate
+ * 				to remove the noise from the audio.
+ *
+ * 	This menu is shown upon exiting from any of the above options.
+ * ---------------------------------------------------------------------------- */
+void menu(){
+	u8 inp = 0x00;
+	u32 CntrlRegister;
+	enum speedup_t KENNY_speed = normaltime;
+
+	/* Turn off all LEDs */
+	Xil_Out32(LED_BASE, 0);
+
+	CntrlRegister = XUartPs_ReadReg(UART_BASEADDR, XUARTPS_CR_OFFSET);
+
+	XUartPs_WriteReg(UART_BASEADDR, XUARTPS_CR_OFFSET,
+				  ((CntrlRegister & ~XUARTPS_CR_EN_DIS_MASK) |
+				   XUARTPS_CR_TX_EN | XUARTPS_CR_RX_EN));
+
+	xil_printf("\r\n\r\n");
+	xil_printf("Enter 's' to stream pure audio, 'r', or 'p' to record/playback, respectively. \r\n");
+	xil_printf("Use the push-buttons to configure the speed of the playback. \r\n");
+	xil_printf("----------------------------------------\r\n");
+
+	// Wait for input from UART via the terminal
+	while (!XUartPs_IsReceiveData(UART_BASEADDR)){
+		kenny_UpdateSpeedupFromGpios(&KENNY_speed);
+	}
+	inp = XUartPs_ReadReg(UART_BASEADDR, XUARTPS_FIFO_OFFSET);
+	// Select function based on UART input
+	switch(inp){
+	case 's':
+		xil_printf("STREAMING AUDIO\r\n");
+		xil_printf("Press 'q' to return to the main menu\r\n");
+		audio_stream();
+		break;
+	case 'r':
+		xil_printf("RECORDING AUDIO\r\n");
+		xil_printf("Press 'q' to stop recording early and return to the main menu\r\n");
+		kenny_RecordAudioIntoMem();
+		break;
+	case 'p':
+		xil_printf("PLAYING BACK AUDIO\r\n");
+		xil_printf("Press 'q' to stop recording early and return to the main menu\r\n");
+		kenny_PlaybackAudioFromMem(KENNY_speed);
+		break;
+	default:
+		menu();
+		break;
+	} // switch
+} // menu()
+
+
