@@ -183,19 +183,20 @@
 void audio_stream(){
 	u32  in_left, in_right;
 
-	while (!XUartPs_IsReceiveData(UART_BASEADDR)){
-		// Read audio input from codec
-		in_left = Xil_In32(I2S_DATA_RX_L_REG);
-		in_right = Xil_In32(I2S_DATA_RX_R_REG);
-		// Write audio output to codec
-		Xil_Out32(I2S_DATA_TX_L_REG, in_left);
-		Xil_Out32(I2S_DATA_TX_R_REG, in_right);
+	while (1)
+	{
+		if (!XUartPs_IsReceiveData(UART_BASEADDR)){
+			// Read audio input from codec
+			in_left = Xil_In32(I2S_DATA_RX_L_REG);
+			in_right = Xil_In32(I2S_DATA_RX_R_REG);
+			// Write audio output to codec
+			Xil_Out32(I2S_DATA_TX_L_REG, in_left);
+			Xil_Out32(I2S_DATA_TX_R_REG, in_right);
+		}
+		else if (XUartPs_ReadReg(UART_BASEADDR, XUARTPS_FIFO_OFFSET) == 'q'){
+			return;
+		}
 	}
-
-	/* If input from the terminal is 'q', then return to menu.
-	 * Else, continue streaming. */
-	if(XUartPs_ReadReg(UART_BASEADDR, XUARTPS_FIFO_OFFSET) == 'q') menu();
-	else audio_stream();
 } // audio_stream()
 
 

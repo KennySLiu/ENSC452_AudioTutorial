@@ -15,37 +15,37 @@ const int MAX_RECORD_SEC = 8;
 const int KENNY_AUDIO_MAX_SAMPLES = AUDIO_SAMPLE_RATE * MAX_RECORD_SEC * AUDIO_CHANNELS;
 
 const int SAMPLE_SLEEP_USEC = 21;
-int SpeedAdjustment = 0;
+int PlaybackSpeedAdjustment = 0;
 
 
-void kenny_UpdateSpeedupFromGpios()
+void kenny_UpdatePlaybackSpeedFromGpios()
 {
 	u32 btns;
 	btns = XGpio_DiscreteRead(&Gpio, BUTTON_CHANNEL);
 
 	if (btns == 1){
-		SpeedAdjustment = 0;
+		PlaybackSpeedAdjustment = 0;
 		xil_printf("Speed reset to default time\r\n");
 	}
 	else if (btns == 4){
 		xil_printf("Playback speed decreased \r\n");
-		SpeedAdjustment++;
+		PlaybackSpeedAdjustment++;
 	}
 	else if (btns == 2){
-		SpeedAdjustment = SAMPLE_SLEEP_USEC;
+		PlaybackSpeedAdjustment = SAMPLE_SLEEP_USEC;
 		xil_printf("Playback speed reset to half-time\r\n");
 	}
 	else if (btns == 8){
-		if (SpeedAdjustment <= -SAMPLE_SLEEP_USEC + 1){
+		if (PlaybackSpeedAdjustment <= -SAMPLE_SLEEP_USEC + 1){
 			xil_printf("Playback speed cannot increase more \r\n");
 		}
 		else{
-			--SpeedAdjustment;
+			--PlaybackSpeedAdjustment;
 			xil_printf("Playback speed increased\r\n");
 		}
 	}
 	else if (btns == 16){
-		SpeedAdjustment = -SAMPLE_SLEEP_USEC/2;
+		PlaybackSpeedAdjustment = -SAMPLE_SLEEP_USEC/2;
 		xil_printf("Playback speed reset to double-time\r\n");
 	}
 	if (btns != 0){
@@ -54,8 +54,107 @@ void kenny_UpdateSpeedupFromGpios()
 }
 
 
+int kenny_sinehelper_UpdateFrequencyFromGpios(double * target_freq)
+{
+	u32 btns;
+	btns = XGpio_DiscreteRead(&Gpio, BUTTON_CHANNEL);
+	const float DEFAULT_FREQUENCY = 220.0;
+	const double MIN_FREQ = 40.0;
+	const double MAX_FREQ = 10000.0;
+
+	if (btns == 1){
+		*target_freq = DEFAULT_FREQUENCY;
+		xil_printf("Target Frequency reset to %f Hz\r\n", DEFAULT_FREQUENCY);
+	}
+	else if (btns == 4){
+		if (*target_freq > MAX_FREQ){
+			xil_printf("Target Frequency cannot go higher\r\n");
+		}
+		else{
+			// twelfth root of 2, aka one semitone in 12TET
+			*target_freq *= 1.05946309436;
+			xil_printf("Increasing frequency by 1 semitone\r\n");
+		}
+	}
+	else if (btns == 2){
+		if (*target_freq > MAX_FREQ){
+			xil_printf("Target Frequency cannot go higher\r\n");
+		}
+		else{
+			// octave jump
+			*target_freq *= 2;
+			xil_printf("Increasing frequency by 1 octave\r\n");
+		}
+	}
+	else if (btns == 8){
+		if (*target_freq < MIN_FREQ){
+			xil_printf("Target Frequency cannot go lower\r\n");
+		}
+		else{
+			// inverse of the 12th root of 2
+			*target_freq *= 0.94387431268;
+			xil_printf("Decreasing frequency by 1 semitone\r\n");
+		}
+	}
+	else if (btns == 16){
+		if (*target_freq < MIN_FREQ){
+			xil_printf("Target Frequency cannot go lower\r\n");
+		}
+		else{
+			// twelfth root of 2, aka one semitone in 12TET
+			*target_freq /= 2;
+			xil_printf("Decreasing frequency by 1 octave\r\n");
+		}
+	}
+
+	if (btns == 0) {
+		return 0;
+	} else {
+		return 1;
+	}
+}
+
 void kenny_PlaySineWave()
 {
+	const int GPIO_CTR_MAX = 10000;
+	const int PEAK_AMPLITUDE = 16777216/4;
+	int gpio_timeout_ctr = GPIO_CTR_MAX;
+	int gpios_activated = 0;
+	int sample_num = 0;
+	double target_freq = 220;
+
+	while (1)
+	{
+		if (!XUartPs_IsReceiveData(UART_BASEADDR)){
+
+			if (gpio_timeout_ctr == GPIO_CTR_MAX){
+				gpios_activated = kenny_sinehelper_UpdateFrequencyFromGpios(&target_freq);
+				if (gpios_activated) {
+					gpio_timeout_ctr = 0;
+				}
+			} else {
+				gpios_activated = 0;
+			}
+
+			if (gpio_timeout_ctr != GPIO_CTR_MAX) {
+				++gpio_timeout_ctr;
+			}
+
+			double sine_arg = sample_num++ * 6.28 * target_freq/AUDIO_SAMPLE_RATE;
+
+			double out_value_float = sin(sine_arg)*PEAK_AMPLITUDE;
+			s32 out_value = out_value_float;
+			//xil_printf("%d\r\n", out_value);
+
+			// Write audio data to audio codec
+			Xil_Out32(I2S_DATA_TX_L_REG, out_value);
+			Xil_Out32(I2S_DATA_TX_R_REG, out_value);
+			usleep(SAMPLE_SLEEP_USEC);
+		}
+		else if (XUartPs_ReadReg(UART_BASEADDR, XUARTPS_FIFO_OFFSET) == 'q'){
+			break;
+		}
+	}
 
 }
 
@@ -79,7 +178,7 @@ void kenny_PlaybackAudioFromMem(const int* KENNY_AUDIO_MEM_PTR)
 			Xil_Out32(I2S_DATA_TX_L_REG, in_left);
 			Xil_Out32(I2S_DATA_TX_R_REG, in_right);
 
-			usleep(SAMPLE_SLEEP_USEC + SpeedAdjustment);
+			usleep(SAMPLE_SLEEP_USEC + PlaybackSpeedAdjustment);
 
 			if (num_samples_recorded >= KENNY_AUDIO_MAX_SAMPLES-1){
 				break;
@@ -204,8 +303,9 @@ void printMenu(){
 }
 
 void menu(){
-	int * KENNY_AUDIO_MEM_PTR = 0x00200000;
-			//malloc(sizeof(int) * KENNY_AUDIO_MAX_SAMPLES);
+	int * KENNY_AUDIO_MEM_PTR = malloc(sizeof(int) * KENNY_AUDIO_MAX_SAMPLES);
+
+	xil_printf("audio ptr = %x\r\n", (int)KENNY_AUDIO_MEM_PTR);
 
 	u8 inp = 0x00;
 	u32 CntrlRegister;
@@ -223,7 +323,7 @@ void menu(){
 	// Wait for input from UART via the terminal
 	while (1){
 		if (!XUartPs_IsReceiveData(UART_BASEADDR)){
-			kenny_UpdateSpeedupFromGpios();
+			kenny_UpdatePlaybackSpeedFromGpios();
 		}
 		else
 		{
