@@ -19,6 +19,7 @@
 #include "xgpio.h"
 #include "xuartps.h"
 #include "stdlib.h"
+#include "math.h"
 
 /* ---------------------------------------------------------------------------- *
  * 							Custom IP Header Files								*

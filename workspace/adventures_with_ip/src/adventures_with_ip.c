@@ -5,124 +5,98 @@
  */
 #include "adventures_with_ip.h"
 
-const int * KENNY_AUDIO_MEM_START = (int *) 0x00200000;
-const int * KENNY_AUDIO_MEM_END   = (int *) 0x3fffffff;
+//const int * KENNY_AUDIO_MEM_START = (int *) 0x00200000;
+//const int * KENNY_AUDIO_MEM_END   = (int *) 0x3fffffff;
 //const int * KENNY_AUDIO_MEM_END   = (int *) 0x3FFFFFFF;
 
-enum speedup_t {quartertime = 1, halftime = 2, normaltime = 3, doubletime = 4, quadrupletime = 5, unchanged = 0};
+const int AUDIO_SAMPLE_RATE = 48000;
+const int AUDIO_CHANNELS = 2;
+const int MAX_RECORD_SEC = 8;
+const int KENNY_AUDIO_MAX_SAMPLES = AUDIO_SAMPLE_RATE * MAX_RECORD_SEC * AUDIO_CHANNELS;
+
+const int SAMPLE_SLEEP_USEC = 21;
+int SpeedAdjustment = 0;
 
 
-void kenny_UpdateSpeedupFromGpios(enum speedup_t * speedup)
+void kenny_UpdateSpeedupFromGpios()
 {
 	u32 btns;
 	btns = XGpio_DiscreteRead(&Gpio, BUTTON_CHANNEL);
 
 	if (btns == 1){
-		if (*speedup != normaltime){
-			xil_printf("Speed = normal\r\n");
-		}
-		*speedup = normaltime;
+		SpeedAdjustment = 0;
+		xil_printf("Speed reset to default time\r\n");
 	}
 	else if (btns == 4){
-		if (*speedup != halftime){
-			xil_printf("Speed = half\r\n");
-		}
-		*speedup = halftime;
+		xil_printf("Playback speed decreased \r\n");
+		SpeedAdjustment++;
 	}
 	else if (btns == 2){
-		if (*speedup != quartertime){
-			xil_printf("Speed = quarter\r\n");
-		}
-		*speedup = quartertime;
+		SpeedAdjustment = SAMPLE_SLEEP_USEC;
+		xil_printf("Playback speed reset to half-time\r\n");
 	}
 	else if (btns == 8){
-		if (*speedup != doubletime){
-			xil_printf("Speed = double\r\n");
+		if (SpeedAdjustment <= -SAMPLE_SLEEP_USEC + 1){
+			xil_printf("Playback speed cannot increase more \r\n");
 		}
-		*speedup = doubletime;
+		else{
+			--SpeedAdjustment;
+			xil_printf("Playback speed increased\r\n");
+		}
 	}
 	else if (btns == 16){
-		if (*speedup != quadrupletime){
-			xil_printf("Speed = quadruple\r\n");
-		}
-		*speedup = quadrupletime;
+		SpeedAdjustment = -SAMPLE_SLEEP_USEC/2;
+		xil_printf("Playback speed reset to double-time\r\n");
+	}
+	if (btns != 0){
+		usleep(250000);
 	}
 }
 
-void kenny_PlaybackAudioFromMem(enum speedup_t speed)
+
+void kenny_PlaySineWave()
+{
+
+}
+
+
+
+void kenny_PlaybackAudioFromMem(const int* KENNY_AUDIO_MEM_PTR)
 {
 	u32  in_left, in_right;
-	int * cur_ptr = KENNY_AUDIO_MEM_START;
-	u32 out_of_mem_flag = 0;
+	int * cur_ptr = KENNY_AUDIO_MEM_PTR;
+	u32 num_samples_recorded = 0;
 
-	int i = 0;
-	int threshold = 0;
-	int incr_amount = 0;
+	while (1)
+	{
+		if (!XUartPs_IsReceiveData(UART_BASEADDR)){
+			// Read audio data from memory
+			in_left  = *(cur_ptr++);
+			in_right = *(cur_ptr++);
+			num_samples_recorded += 2;
 
-	while (!XUartPs_IsReceiveData(UART_BASEADDR)){
-		if (speed == quartertime)
-		{
-			threshold = 4;
-			incr_amount = 1;
+			// Write audio data to audio codec
+			Xil_Out32(I2S_DATA_TX_L_REG, in_left);
+			Xil_Out32(I2S_DATA_TX_R_REG, in_right);
+
+			usleep(SAMPLE_SLEEP_USEC + SpeedAdjustment);
+
+			if (num_samples_recorded >= KENNY_AUDIO_MAX_SAMPLES-1){
+				break;
+			}
 		}
-		else if (speed == halftime)
-		{
-			threshold = 2;
-			incr_amount = 1;
-		}
-		else if (speed == normaltime)
-		{
-			threshold = 1;
-			incr_amount = 1;
-		}
-		else if (speed == doubletime)
-		{
-			threshold = 1;
-			incr_amount = 2;
-		}
-		else if (speed == quadrupletime)
-		{
-			threshold = 1;
-			incr_amount = 4;
-		}
-
-
-		// Read audio data from memory
-		in_left  = *(cur_ptr);
-		in_right = *(cur_ptr+1);
-		++i;
-
-		if (i == threshold){
-			i = 0;
-			cur_ptr += 2*incr_amount;
-		}
-
-		// Write audio data to audio codec
-		Xil_Out32(I2S_DATA_TX_L_REG, in_left);
-		Xil_Out32(I2S_DATA_TX_R_REG, in_right);
-
-		if (cur_ptr >= KENNY_AUDIO_MEM_END-1){
-			out_of_mem_flag = 1;
+		else if (XUartPs_ReadReg(UART_BASEADDR, XUARTPS_FIFO_OFFSET) == 'q'){
 			break;
 		}
 	}
-
-	if (out_of_mem_flag == 1){
-		menu();
-	}
-	/* If input from the terminal is 'q', then return to menu.
-	 * Else, continue streaming. */
-	if(XUartPs_ReadReg(UART_BASEADDR, XUARTPS_FIFO_OFFSET) == 'q') menu();
-	else kenny_PlaybackAudioFromMem(speed);
-
 }
 
 
-void kenny_RecordAudioIntoMem()
+void kenny_RecordAudioIntoMem(const int* KENNY_AUDIO_MEM_PTR)
 {
 	u32  in_left, in_right;
-	int * cur_ptr = KENNY_AUDIO_MEM_START;
-	u32 out_of_mem_flag = 0;
+	int * cur_ptr = KENNY_AUDIO_MEM_PTR;
+	u32 num_samples_recorded = 0;
 
 	//memset(KENNY_AUDIO_MEM_START, 0, (KENNY_AUDIO_MEM_END - KENNY_AUDIO_MEM_START));
 
@@ -133,32 +107,26 @@ void kenny_RecordAudioIntoMem()
 	}
 	*/
 
-	while (!XUartPs_IsReceiveData(UART_BASEADDR)){
-		// Read audio input from codec
-		in_left = Xil_In32(I2S_DATA_RX_L_REG);
-		in_right = Xil_In32(I2S_DATA_RX_R_REG);
-		// Save to memory
+	while (1){
+		if (!XUartPs_IsReceiveData(UART_BASEADDR)){
+			// Read audio input from codec
+			in_left = Xil_In32(I2S_DATA_RX_L_REG);
+			in_right = Xil_In32(I2S_DATA_RX_R_REG);
+			// Save to memory
+			*(cur_ptr++) = in_left;
+			*(cur_ptr++) = in_right;
+			num_samples_recorded += 2;
 
+			usleep(SAMPLE_SLEEP_USEC);
 
-		*(cur_ptr++) = in_left;
-		*(cur_ptr++) = in_right;
-
-
-		if (cur_ptr >= KENNY_AUDIO_MEM_END-1){
-			out_of_mem_flag = 1;
+			if (num_samples_recorded >= KENNY_AUDIO_MAX_SAMPLES-1){
+				break;
+			}
+		}
+		else if (XUartPs_ReadReg(UART_BASEADDR, XUARTPS_FIFO_OFFSET) == 'q'){
 			break;
 		}
 	}
-
-	if (out_of_mem_flag == 1){
-		menu();
-	}
-
-	/* If input from the terminal is 'q', then return to menu.
-	 * Else, continue streaming. */
-	if(XUartPs_ReadReg(UART_BASEADDR, XUARTPS_FIFO_OFFSET) == 'q') menu();
-	else kenny_RecordAudioIntoMem();
-
 }
 
 void kenny_GPIOTest(){
@@ -184,6 +152,7 @@ int main(void)
 	xil_printf("Entering Main\r\n");
 	//Configure the IIC data structure
 	IicConfig(XPAR_XIICPS_0_DEVICE_ID);
+
 
 	//Configure the Audio Codec's PLL
 	AudioPllConfig();
@@ -225,10 +194,21 @@ int main(void)
  *
  * 	This menu is shown upon exiting from any of the above options.
  * ---------------------------------------------------------------------------- */
+void printMenu(){
+	xil_printf("\r\n\r\n");
+	xil_printf("Enter 's' to stream pure audio. \r\n");
+	xil_printf("Enter 'r' or 'p' to record/playback, respectively. \r\n");
+	xil_printf("Enter 't' to play a sine wave. \r\n");
+	xil_printf("Use the push-buttons to configure the speed of the playback. \r\n");
+	xil_printf("----------------------------------------\r\n");
+}
+
 void menu(){
+	int * KENNY_AUDIO_MEM_PTR = 0x00200000;
+			//malloc(sizeof(int) * KENNY_AUDIO_MAX_SAMPLES);
+
 	u8 inp = 0x00;
 	u32 CntrlRegister;
-	enum speedup_t KENNY_speed = normaltime;
 
 	/* Turn off all LEDs */
 	Xil_Out32(LED_BASE, 0);
@@ -239,37 +219,44 @@ void menu(){
 				  ((CntrlRegister & ~XUARTPS_CR_EN_DIS_MASK) |
 				   XUARTPS_CR_TX_EN | XUARTPS_CR_RX_EN));
 
-	xil_printf("\r\n\r\n");
-	xil_printf("Enter 's' to stream pure audio, 'r', or 'p' to record/playback, respectively. \r\n");
-	xil_printf("Use the push-buttons to configure the speed of the playback. \r\n");
-	xil_printf("----------------------------------------\r\n");
-
+	printMenu();
 	// Wait for input from UART via the terminal
-	while (!XUartPs_IsReceiveData(UART_BASEADDR)){
-		kenny_UpdateSpeedupFromGpios(&KENNY_speed);
+	while (1){
+		if (!XUartPs_IsReceiveData(UART_BASEADDR)){
+			kenny_UpdateSpeedupFromGpios();
+		}
+		else
+		{
+			inp = XUartPs_ReadReg(UART_BASEADDR, XUARTPS_FIFO_OFFSET);
+			// Select function based on UART input
+			switch(inp){
+				case 's':
+					xil_printf("STREAMING AUDIO\r\n");
+					xil_printf("Press 'q' to return to the main menu\r\n");
+					audio_stream();
+					break;
+				case 'r':
+					xil_printf("RECORDING AUDIO\r\n");
+					xil_printf("Press 'q' to stop recording early and return to the main menu\r\n");
+					kenny_RecordAudioIntoMem(KENNY_AUDIO_MEM_PTR);
+					break;
+				case 'p':
+					xil_printf("PLAYING BACK RECORDED AUDIO\r\n");
+					xil_printf("Press 'q' to stop playback early and return to the main menu\r\n");
+					kenny_PlaybackAudioFromMem(KENNY_AUDIO_MEM_PTR);
+					break;
+
+				case 't':
+					xil_printf("PLAYING SINE WAVE\r\n");
+					xil_printf("Press 'q' to return to main menu\r\n");
+					kenny_PlaySineWave();
+				default:
+					break;
+			} // switch
+			printMenu();
+		}
 	}
-	inp = XUartPs_ReadReg(UART_BASEADDR, XUARTPS_FIFO_OFFSET);
-	// Select function based on UART input
-	switch(inp){
-	case 's':
-		xil_printf("STREAMING AUDIO\r\n");
-		xil_printf("Press 'q' to return to the main menu\r\n");
-		audio_stream();
-		break;
-	case 'r':
-		xil_printf("RECORDING AUDIO\r\n");
-		xil_printf("Press 'q' to stop recording early and return to the main menu\r\n");
-		kenny_RecordAudioIntoMem();
-		break;
-	case 'p':
-		xil_printf("PLAYING BACK AUDIO\r\n");
-		xil_printf("Press 'q' to stop recording early and return to the main menu\r\n");
-		kenny_PlaybackAudioFromMem(KENNY_speed);
-		break;
-	default:
-		menu();
-		break;
-	} // switch
+
 } // menu()
 
 
